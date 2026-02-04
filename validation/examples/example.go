@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"sego/validation"
+	"github.com/selanim/sego/validation"
 )
 
 // User represents a user model with validation tags

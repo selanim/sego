@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sego/responseutils"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/selanim/sego/responseutils"
 )
 
 // Handlers contains all HTTP handlers

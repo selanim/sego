@@ -3,10 +3,9 @@ package examples
 import (
 	"context"
 	"fmt"
+	"github.com/selanim/sego/logger"
 	"os"
 	"time"
-
-	"sego/logger"
 )
 
 func ExampleBasicLogging() {

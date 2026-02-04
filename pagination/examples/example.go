@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"time"
 
-	"sego/pagination"
+	"github.com/selanim/sego/pagination"
 )
 
 // User represents a user model
