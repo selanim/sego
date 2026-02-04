@@ -2,25 +2,29 @@ package authutils
 
 import (
 	"context"
-	"crypto/pbkdf2"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/pbkdf2"
+	"hash"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/argon2"
-	"golang.org/x/crypto/bcrypt"
+	"fmt"
 )
 
 // Aina ya password hashing algorithm
@@ -269,6 +273,7 @@ func (au *AuthUtils) hashWithPBKDF2(password string) (string, string, error) {
 	}
 
 	// Hash password using PBKDF2 with HMAC-SHA256
+	// FIXED: pbkdf2.Key returns only one value, not two
 	hash := pbkdf2.Key([]byte(password), salt, config.Iterations, int(config.KeyLength), sha256.New)
 
 	// Encode hash and salt
@@ -384,41 +389,56 @@ func (au *AuthUtils) verifyArgon2(password, hash string) (bool, error) {
 	// Compare hashes with constant time comparison
 	return subtle.ConstantTimeCompare(computedHash, expectedHash) == 1, nil
 }
-
-// verifyPBKDF2 inaverify password kwa PBKDF2
-func (au *AuthUtils) verifyPBKDF2(password, hash string) (bool, error) {
-	// Parse hash parameters
-	parts := strings.Split(hash, "$")
+func (au *AuthUtils) verifyPBKDF2(password, hashStr string) (bool, error) {
+	parts := strings.Split(hashStr, "$")
 	if len(parts) != 5 {
-		return false, NewAuthError("PBKDF2_ERROR", "Invalid PBKDF2 hash format", nil)
+		return false, NewAuthError("PBKDF2_ERROR", "invalid PBKDF2 hash format", nil)
 	}
 
-	// Extract iterations
-	var iterations int
-	fmt.Sscanf(strings.TrimPrefix(parts[2], "i="), "%d", &iterations)
+	algorithmPart := strings.ToLower(parts[1])
+	iterationsPart := parts[2]
 
-	// Decode salt and hash
+	var iterations int
+	var err error
+	if strings.HasPrefix(iterationsPart, "i=") {
+		iterations, err = strconv.Atoi(iterationsPart[2:])
+	} else {
+		iterations, err = strconv.Atoi(iterationsPart)
+	}
+	if err != nil {
+		return false, NewAuthError("PBKDF2_ERROR", "failed to parse iterations", err)
+	}
+
 	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
 	if err != nil {
-		return false, NewAuthError("DECODE_ERROR", "Failed to decode salt", err)
+		return false, NewAuthError("DECODE_ERROR", "failed to decode salt", err)
 	}
 
 	expectedHash, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
-		return false, NewAuthError("DECODE_ERROR", "Failed to decode hash", err)
+		return false, NewAuthError("DECODE_ERROR", "failed to decode hash", err)
 	}
 
-	// Compute hash with same parameters
-	computedHash := pbkdf2.Key(
-		[]byte(password),
-		salt,
-		iterations,
-		len(expectedHash),
-		sha256.New,
-	)
+	var hashFunc func() hash.Hash
 
-	// Compare hashes with constant time comparison
-	return subtle.ConstantTimeCompare(computedHash, expectedHash) == 1, nil
+	switch algorithmPart {
+	case "pbkdf2-sha256":
+		hashFunc = sha256.New
+	case "pbkdf2-sha512":
+		hashFunc = sha512.New
+	case "pbkdf2-sha1":
+		hashFunc = sha1.New
+	default:
+		return false, fmt.Errorf("unsupported PBKDF2 algorithm: %s", algorithmPart)
+	}
+
+	// Compute PBKDF2 hash
+	computedHash := pbkdf2.Key([]byte(password), salt, iterations, len(expectedHash), hashFunc)
+
+	if subtle.ConstantTimeCompare(computedHash, expectedHash) == 1 {
+		return true, nil
+	}
+	return false, nil
 }
 
 // GenerateTokens inatengeneza access na refresh tokens
@@ -588,7 +608,7 @@ func (au *AuthUtils) ExtractTokenFromRequest(r *http.Request) string {
 // RefreshTokens ina generate tokens mpya kutokana na refresh token
 func (au *AuthUtils) RefreshTokens(refreshToken string, userData *UserData) (*TokenDetails, error) {
 	// Validate refresh token
-	claims, err := au.ValidateToken(refreshToken)
+	_, err := au.ValidateToken(refreshToken)
 	if err != nil {
 		return nil, err
 	}
@@ -1025,4 +1045,59 @@ func (au *AuthUtils) SanitizeInput(input string) string {
 	return input
 }
 
-// Note: Make sure to add required imports at the top
+// PBKDF2 hash parsing utility
+func parsePBKDF2Hash(hashStr string) (algorithm string, iterations int, salt, hashBytes []byte, err error) {
+	parts := strings.Split(hashStr, "$")
+	if len(parts) < 5 {
+		return "", 0, nil, nil, NewAuthError("PBKDF2_ERROR", "Invalid PBKDF2 hash format", nil)
+	}
+
+	algorithm = parts[1]
+
+	// Parse iterations
+	iterationsPart := parts[2]
+	if strings.HasPrefix(iterationsPart, "i=") {
+		_, err = fmt.Sscanf(iterationsPart, "i=%d", &iterations)
+		if err != nil {
+			return "", 0, nil, nil, err
+		}
+	} else {
+		// Backward compatibility
+		_, err = fmt.Sscanf(iterationsPart, "%d", &iterations)
+		if err != nil {
+			return "", 0, nil, nil, err
+		}
+	}
+
+	// Decode salt
+	salt, err = base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return "", 0, nil, nil, err
+	}
+
+	// Decode hash
+	hashBytes, err = base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return "", 0, nil, nil, err
+	}
+
+	return algorithm, iterations, salt, hashBytes, nil
+}
+
+// Test function for PBKDF2 verification
+func TestPBKDF2Verification() {
+	auth := NewAuthUtils(TokenConfig{
+		SecretKey: "test",
+	})
+
+	// Test PBKDF2 verification
+	password := "testpassword"
+	hash := "$pbkdf2-sha256$i=310000$c2FsdGV4YW1wbGU=$hashhashhashhashhashhashhashhash"
+
+	valid, err := auth.verifyPBKDF2(password, hash)
+	if err != nil {
+		log.Printf("Error: %v", err)
+	} else {
+		log.Printf("Valid: %v", valid)
+	}
+}
